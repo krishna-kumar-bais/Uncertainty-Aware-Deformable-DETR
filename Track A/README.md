@@ -1,169 +1,242 @@
-# Deformable DETR
+# Track A — Aleatoric Variance Head
 
-By [Xizhou Zhu](https://scholar.google.com/citations?user=02RXI00AAAAJ),  [Weijie Su](https://www.weijiesu.com/),  [Lewei Lu](https://www.linkedin.com/in/lewei-lu-94015977/), [Bin Li](http://staff.ustc.edu.cn/~binli/), [Xiaogang Wang](http://www.ee.cuhk.edu.hk/~xgwang/), [Jifeng Dai](https://jifengdai.org/).
+Part of the **Uncertainty-Aware Deformable DETR** project
+(CS776 course project, IIT Kanpur).
 
-This repository is an official implementation of the paper [Deformable DETR: Deformable Transformers for End-to-End Object Detection](https://arxiv.org/abs/2010.04159).
+Track A turns the standard Deformable DETR detector into an
+**aleatoric-uncertainty-aware detector** by adding a lightweight
+variance head on top of the decoder. The head predicts a per-box
+`log_var ∈ R^4` (one log-variance per bounding-box coordinate) that is
+trained with a numerically stable heteroscedastic regression loss.
 
+The detector weights are **frozen** by default, so Track A is a cheap
+fine-tune: only the new `var_embed` MLP is updated.
 
-## Introduction
+> For the full multi-track pipeline (Track A + B + C, evaluation,
+> calibration, MC-dropout, and uncertainty-weighted fine-tuning) see the
+> top-level `README.md` and `Track A+B+C/`. This folder is a
+> **self-contained** version of Track A.
 
-**TL; DR.** Deformable DETR is an efficient and fast-converging end-to-end object detector. It mitigates the high complexity and slow convergence issues of DETR via a novel sampling-based efficient attention mechanism.  
+## 1. What is in this folder
 
-![deformable_detr](./figs/illustration.png)
-
-![deformable_detr](./figs/convergence.png)
-
-**Abstract.** DETR has been recently proposed to eliminate the need for many hand-designed components in object detection while demonstrating good performance. However, it suffers from slow convergence and limited feature spatial resolution, due to the limitation of Transformer attention modules in processing image feature maps. To mitigate these issues, we proposed Deformable DETR, whose attention modules only attend to a small set of key sampling points around a reference. Deformable DETR can achieve better performance than DETR (especially on small objects) with 10× less training epochs. Extensive experiments on the COCO benchmark demonstrate the effectiveness of our approach.
-
-## License
-
-This project is released under the [Apache 2.0 license](./LICENSE).
-
-## Changelog
-
-See [changelog.md](./docs/changelog.md) for detailed logs of major changes. 
-
-
-## Citing Deformable DETR
-If you find Deformable DETR useful in your research, please consider citing:
-```bibtex
-@article{zhu2020deformable,
-  title={Deformable DETR: Deformable Transformers for End-to-End Object Detection},
-  author={Zhu, Xizhou and Su, Weijie and Lu, Lewei and Li, Bin and Wang, Xiaogang and Dai, Jifeng},
-  journal={arXiv preprint arXiv:2010.04159},
-  year={2020}
-}
+```text
+Track A/
+├── README.md                     <- this file
+├── LICENSE                       <- Apache 2.0 (inherited from Deformable DETR)
+├── Track A.ipynb                 <- Kaggle-ready fine-tuning notebook
+├── Track A finetuned.pth         <- Track A checkpoint (variance head trained)
+├── benchmark.py                  <- inference-speed benchmark
+├── main.py                       <- training / evaluation entry point
+├── engine.py                     <- training & evaluation loops
+├── requirements.txt              <- Python deps (pycocotools, tqdm, cython, scipy)
+├── configs/                      <- shell configs for the base detector
+├── datasets/                     <- COCO / panoptic dataset wrappers
+├── models/
+│   ├── deformable_detr.py        <- DeformableDETR with `var_embed` head
+│   ├── deformable_transformer.py
+│   ├── backbone.py, matcher.py, position_encoding.py, segmentation.py
+│   ├── r50_deformable_detr-checkpoint.pth   <- base pretrained checkpoint
+│   └── ops/                      <- custom CUDA deformable-attention op
+├── tools/                        <- distributed launch helpers
+├── util/                         <- boxes, misc utilities, plotting
+└── figs/                         <- Deformable DETR figures (upstream)
 ```
 
-## Main Results
+## 2. Method (Track A in one page)
 
-| <sub><sub>Method</sub></sub>   | <sub><sub>Epochs</sub></sub> | <sub><sub>AP</sub></sub> | <sub><sub>AP<sub>S</sub></sub></sub> | <sub><sub>AP<sub>M</sub></sub></sub> | <sub><sub>AP<sub>L</sub></sub></sub> | <sub><sub>params<br>(M)</sub></sub> | <sub><sub>FLOPs<br>(G)</sub></sub> | <sub><sub>Total<br>Train<br>Time<br>(GPU<br/>hours)</sub></sub> | <sub><sub>Train<br/>Speed<br>(GPU<br/>hours<br/>/epoch)</sub></sub> | <sub><sub>Infer<br/>Speed<br/>(FPS)</sub></sub> | <sub><sub>Batch<br/>Infer<br/>Speed<br>(FPS)</sub></sub> | <sub><sub>URL</sub></sub>                     |
-| ----------------------------------- | :----: | :--: | :----: | :---: | :------------------------------: | :--------------------:| :----------------------------------------------------------: | :--: | :---: | :---: | ----- | ----- |
-| <sub><sub>Faster R-CNN + FPN</sub></sub> | <sub>109</sub> | <sub>42.0</sub> | <sub>26.6</sub> | <sub>45.4</sub> | <sub>53.4</sub> | <sub>42</sub> | <sub>180</sub> | <sub>380</sub> | <sub>3.5</sub> | <sub>25.6</sub> | <sub>28.0</sub> | <sub>-</sub> |
-| <sub><sub>DETR</sub></sub> | <sub>500</sub> | <sub>42.0</sub> | <sub>20.5</sub> | <sub>45.8</sub> | <sub>61.1</sub> | <sub>41</sub> | <sub>86</sub> | <sub>2000</sub> | <sub>4.0</sub> |     <sub>27.0</sub>       |         <sub>38.3</sub>           | <sub>-</sub> |
-| <sub><sub>DETR-DC5</sub></sub>      | <sub>500</sub> | <sub>43.3</sub> | <sub>22.5</sub> | <sub>47.3</sub> | <sub>61.1</sub> | <sub>41</sub> |<sub>187</sub>|<sub>7000</sub>|<sub>14.0</sub>|<sub>11.4</sub>|<sub>12.4</sub>| <sub>-</sub> |
-| <sub><sub>DETR-DC5</sub></sub>      | <sub>50</sub> | <sub>35.3</sub> | <sub>15.2</sub> | <sub>37.5</sub> | <sub>53.6</sub> | <sub>41</sub> |<sub>187</sub>|<sub>700</sub>|<sub>14.0</sub>|<sub>11.4</sub>|<sub>12.4</sub>| <sub>-</sub> |
-| <sub><sub>DETR-DC5+</sub></sub>     | <sub>50</sub> | <sub>36.2</sub> | <sub>16.3</sub> | <sub>39.2</sub> | <sub>53.9</sub> | <sub>41</sub> |<sub>187</sub>|<sub>700</sub>|<sub>14.0</sub>|<sub>11.4</sub>|<sub>12.4</sub>| <sub>-</sub> |
-| **<sub><sub>Deformable DETR<br>(single scale)</sub></sub>** | <sub>50</sub> | <sub>39.4</sub> | <sub>20.6</sub> | <sub>43.0</sub> | <sub>55.5</sub> | <sub>34</sub> |<sub>78</sub>|<sub>160</sub>|<sub>3.2</sub>|<sub>27.0</sub>|<sub>42.4</sub>| <sub>[config](./configs/r50_deformable_detr_single_scale.sh)<br/>[log](https://drive.google.com/file/d/1n3ZnZ-UAqmTUR4AZoM4qQntIDn6qCZx4/view?usp=sharing)<br/>[model](https://drive.google.com/file/d/1WEjQ9_FgfI5sw5OZZ4ix-OKk-IJ_-SDU/view?usp=sharing)</sub> |
-| **<sub><sub>Deformable DETR<br>(single scale, DC5)</sub></sub>** | <sub>50</sub> | <sub>41.5</sub> | <sub>24.1</sub> | <sub>45.3</sub> | <sub>56.0</sub> | <sub>34</sub> |<sub>128</sub>|<sub>215</sub>|<sub>4.3</sub>|<sub>22.1</sub>|<sub>29.4</sub>| <sub>[config](./configs/r50_deformable_detr_single_scale_dc5.sh)<br/>[log](https://drive.google.com/file/d/1-UfTp2q4GIkJjsaMRIkQxa5k5vn8_n-B/view?usp=sharing)<br/>[model](https://drive.google.com/file/d/1m_TgMjzH7D44fbA-c_jiBZ-xf-odxGdk/view?usp=sharing)</sub> |
-| **<sub><sub>Deformable DETR</sub></sub>** | <sub>50</sub> | <sub>44.5</sub> | <sub>27.1</sub> | <sub>47.6</sub> | <sub>59.6</sub> | <sub>40</sub> |<sub>173</sub>|<sub>325</sub>|<sub>6.5</sub>|<sub>15.0</sub>|<sub>19.4</sub>|<sub>[config](./configs/r50_deformable_detr.sh)<br/>[log](https://drive.google.com/file/d/18YSLshFjc_erOLfFC-hHu4MX4iyz1Dqr/view?usp=sharing)<br/>[model](https://drive.google.com/file/d/1nDWZWHuRwtwGden77NLM9JoWe-YisJnA/view?usp=sharing)</sub>                   |
-| **<sub><sub>+ iterative bounding box refinement</sub></sub>** | <sub>50</sub> | <sub>46.2</sub> | <sub>28.3</sub> | <sub>49.2</sub> | <sub>61.5</sub> | <sub>41</sub> |<sub>173</sub>|<sub>325</sub>|<sub>6.5</sub>|<sub>15.0</sub>|<sub>19.4</sub>|<sub>[config](./configs/r50_deformable_detr_plus_iterative_bbox_refinement.sh)<br/>[log](https://drive.google.com/file/d/1DFNloITi1SFBWjYzvVEAI75ndwmGM1Uj/view?usp=sharing)<br/>[model](https://drive.google.com/file/d/1JYKyRYzUH7uo9eVfDaVCiaIGZb5YTCuI/view?usp=sharing)</sub> |
-| **<sub><sub>++ two-stage Deformable DETR</sub></sub>** | <sub>50</sub> | <sub>46.9</sub> | <sub>29.6</sub> | <sub>50.1</sub> | <sub>61.6</sub> | <sub>41</sub> |<sub>173</sub>|<sub>340</sub>|<sub>6.8</sub>|<sub>14.5</sub>|<sub>18.8</sub>|<sub>[config](./configs/r50_deformable_detr_plus_iterative_bbox_refinement_plus_plus_two_stage.sh)<br/>[log](https://drive.google.com/file/d/1ozi0wbv5-Sc5TbWt1jAuXco72vEfEtbY/view?usp=sharing) <br/>[model](https://drive.google.com/file/d/15I03A7hNTpwuLNdfuEmW9_taZMNVssEp/view?usp=sharing)</sub> |
+Let `b̂_q` be the predicted bounding box for decoder query `q` and let
+`log σ_q² = var_embed(h_q)` be the log-variance produced by the new MLP
+head from the same decoder feature `h_q`. During training, for every
+matched query the loss is:
 
-*Note:*
+```
+L_A(q) = ||b_q - b̂_q||² / σ_q² + log σ_q²
+```
 
-1. All models of Deformable DETR are trained with total batch size of 32. 
-2. Training and inference speed are measured on NVIDIA Tesla V100 GPU.
-3. "Deformable DETR (single scale)" means only using res5 feature map (of stride 32) as input feature maps for Deformable Transformer Encoder.
-4. "DC5" means removing the stride in C5 stage of ResNet and add a dilation of 2 instead.
-5. "DETR-DC5+" indicates DETR-DC5 with some modifications, including using Focal Loss for bounding box classification and increasing number of object queries to 300.
-6. "Batch Infer Speed" refer to inference with batch size = 4  to maximize GPU utilization.
-7. The original implementation is based on our internal codebase. There are slight differences in the final accuracy and running time due to the plenty details in platform switch.
+with `log σ_q²` clamped to `[log_var_min, log_var_max]` (default
+`[-4, 4]`, i.e. variance ∈ `[0.018, 54.6]`) and the final loss clamped
+to `[0, 100]` for numerical stability (see `SetCriterion.loss_track_a`
+in `models/deformable_detr.py`). NaN / Inf guards zero-out the term if
+anything slips through.
 
+Key implementation choices:
 
-## Installation
+- **Parallel head**, not a modified bbox head — the existing `bbox_embed`
+  is untouched so COCO AP is preserved.
+- **Detector frozen** — `main.py` sets `param.requires_grad = 'var_embed'
+  in name`, so only the variance MLP is trained.
+- **L2 error** in the numerator (better gradients than L1).
+- **Tight log-variance clamp** to keep an untrained head from exploding.
+- Works with every Deformable-DETR variant (single-scale, DC5, +iterative
+  refinement, ++two-stage) via the same `--track_a` flag.
 
-### Requirements
+## 3. Requirements
 
-* Linux, CUDA>=9.2, GCC>=5.4
-  
-* Python>=3.7
+- Linux, NVIDIA GPU, CUDA ≥ 9.2, GCC ≥ 5.4
+- Python ≥ 3.7 (tested on 3.10 / 3.12)
+- PyTorch ≥ 1.5.1, torchvision ≥ 0.6.1
 
-    We recommend you to use Anaconda to create a conda environment:
-    ```bash
-    conda create -n deformable_detr python=3.7 pip
-    ```
-    Then, activate the environment:
-    ```bash
-    conda activate deformable_detr
-    ```
-  
-* PyTorch>=1.5.1, torchvision>=0.6.1 (following instructions [here](https://pytorch.org/))
+```bash
+conda create -n deformable_detr python=3.10 pip
+conda activate deformable_detr
+# Pick the CUDA build matching your driver, e.g.
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+pip install -r requirements.txt
+```
 
-    For example, if your CUDA version is 9.2, you could install pytorch and torchvision as following:
-    ```bash
-    conda install pytorch=1.5.1 torchvision=0.6.1 cudatoolkit=9.2 -c pytorch
-    ```
-  
-* Other requirements
-    ```bash
-    pip install -r requirements.txt
-    ```
+### Compile the deformable-attention CUDA op
 
-### Compiling CUDA operators
 ```bash
 cd ./models/ops
 sh ./make.sh
-# unit test (should see all checking is True)
-python test.py
+python test.py        # expect "all checking is True"
+cd ../..
 ```
 
-## Usage
+On GPUs without the op available (e.g. Kaggle P100) the notebook falls
+back to a pure-PyTorch implementation — correct but slower.
 
-### Dataset preparation
+## 4. Dataset — COCO 2017
 
-Please download [COCO 2017 dataset](https://cocodataset.org/) and organize them as following:
+Download from <https://cocodataset.org> and arrange as:
 
-```
-code_root/
+```text
+Track A/
 └── data/
     └── coco/
         ├── train2017/
         ├── val2017/
         └── annotations/
-        	├── instances_train2017.json
-        	└── instances_val2017.json
+            ├── instances_train2017.json
+            └── instances_val2017.json
 ```
 
-### Training
+You can also pass `--coco_path /absolute/path/to/coco`.
 
-#### Training on single node
+## 5. Pretrained base checkpoint
 
-For example, the command for training Deformable DETR on 8 GPUs is as following:
+Track A fine-tunes **on top of** the official Deformable-DETR R50
+checkpoint. A copy is already included at:
+
+```text
+models/r50_deformable_detr-checkpoint.pth
+```
+
+If you want a fresh copy you can re-download the official one from the
+project's Main Results table (see §9) and drop it in the same location.
+
+## 6. Train Track A (variance head only)
+
+Single GPU:
 
 ```bash
-GPUS_PER_NODE=8 ./tools/run_dist_launch.sh 8 ./configs/r50_deformable_detr.sh
+python main.py \
+  --dataset_file coco \
+  --coco_path ./data/coco \
+  --resume ./models/r50_deformable_detr-checkpoint.pth \
+  --output_dir ./exps/track_a \
+  --track_a \
+  --track_a_loss_coef 0.01 \
+  --log_var_min -4.0 --log_var_max 4.0 \
+  --lr 2e-6 \
+  --batch_size 2 \
+  --epochs 10 \
+  --clip_max_norm 0.01
 ```
 
-#### Training on multiple nodes
+What `--track_a` does:
 
-For example, the command for training Deformable DETR on 2 nodes of each with 8 GPUs is as following:
+| Flag                 | Default | Meaning                                               |
+| -------------------- | ------- | ----------------------------------------------------- |
+| `--track_a`          | off     | Adds the `var_embed` head, enables `loss_track_a`.    |
+| `--track_a_loss_coef`| `1.0`   | Weight of the heteroscedastic loss in the total loss. |
+| `--log_var_min`      | `-8.0`  | Lower clamp on predicted `log σ²`.                    |
+| `--log_var_max`      | `8.0`   | Upper clamp on predicted `log σ²`.                    |
 
-On node 1:
+Recommended starting values (used in the included
+`Track A finetuned.pth`): `--track_a_loss_coef 0.01`,
+`--log_var_min -4.0`, `--log_var_max 4.0`, `--lr 2e-6`,
+`--clip_max_norm 0.01`. The small LR and loss coefficient prevent the
+untrained head from destabilising the frozen detector.
+
+When `--track_a` is enabled, `main.py` automatically freezes every
+parameter whose name does not contain `var_embed` — you can confirm this
+in the console: `number of params: <small number>`.
+
+### Multi-GPU
+
+8 GPUs on one node:
 
 ```bash
-MASTER_ADDR=<IP address of node 1> NODE_RANK=0 GPUS_PER_NODE=8 ./tools/run_dist_launch.sh 16 ./configs/r50_deformable_detr.sh
+GPUS_PER_NODE=8 ./tools/run_dist_launch.sh 8 ./configs/r50_deformable_detr.sh \
+  --resume ./models/r50_deformable_detr-checkpoint.pth \
+  --track_a --track_a_loss_coef 0.01 \
+  --log_var_min -4.0 --log_var_max 4.0 \
+  --output_dir ./exps/track_a
 ```
 
-On node 2:
+Slurm:
 
 ```bash
-MASTER_ADDR=<IP address of node 1> NODE_RANK=1 GPUS_PER_NODE=8 ./tools/run_dist_launch.sh 16 ./configs/r50_deformable_detr.sh
+GPUS_PER_NODE=8 ./tools/run_dist_slurm.sh <partition> track_a 8 \
+  configs/r50_deformable_detr.sh \
+  --resume ./models/r50_deformable_detr-checkpoint.pth \
+  --track_a --track_a_loss_coef 0.01 \
+  --log_var_min -4.0 --log_var_max 4.0 \
+  --output_dir ./exps/track_a
 ```
 
-#### Training on slurm cluster
+### Kaggle notebook
 
-If you are using slurm cluster, you can simply run the following command to train on 1 node with 8 GPUs:
+Open `Track A.ipynb` in a Kaggle GPU notebook with the
+`awsaf49/coco-2017-dataset` dataset attached. The notebook clones the
+repo, installs deps, optionally builds the CUDA op, links COCO under
+`./data/coco`, and runs the exact `main.py` command above.
+
+## 7. Evaluate Track A
 
 ```bash
-GPUS_PER_NODE=8 ./tools/run_dist_slurm.sh <partition> deformable_detr 8 configs/r50_deformable_detr.sh
+python main.py \
+  --eval \
+  --dataset_file coco \
+  --coco_path ./data/coco \
+  --resume "./Track A finetuned.pth" \
+  --output_dir ./exps/track_a_eval \
+  --track_a
 ```
 
-Or 2 nodes of  each with 8 GPUs:
+Standard COCO AP is reported by `pycocotools`. The predicted
+`pred_log_vars` (shape `[N, Q, 4]`) are available on `outputs` for any
+downstream calibration work; the richer uncertainty-aware evaluation
+(ECE, PR-AUC, reliability diagrams, aleatoric/epistemic scores) lives
+in `Track A+B+C/Deformable-DETR/`.
+
+## 8. Benchmark inference speed
 
 ```bash
-GPUS_PER_NODE=8 ./tools/run_dist_slurm.sh <partition> deformable_detr 16 configs/r50_deformable_detr.sh
-```
-#### Some tips to speed-up training
-* If your file system is slow to read images, you may consider enabling '--cache_mode' option to load whole dataset into memory at the beginning of training.
-* You may increase the batch size to maximize the GPU utilization, according to GPU memory of yours, e.g., set '--batch_size 3' or '--batch_size 4'.
-
-### Evaluation
-
-You can get the config file and pretrained model of Deformable DETR (the link is in "Main Results" session), then run following command to evaluate it on COCO 2017 validation set:
-
-```bash
-<path to config file> --resume <path to pre-trained model> --eval
+python benchmark.py \
+  --resume "./Track A finetuned.pth" \
+  --batch_size 1 --num_iters 300 --warm_iters 5 \
+  --dataset_file coco --coco_path ./data/coco \
+  --track_a
 ```
 
-You can also run distributed evaluation by using ```./tools/run_dist_launch.sh``` or ```./tools/run_dist_slurm.sh```.
+Prints FPS; Track A adds only an MLP per query so the overhead over the
+baseline detector is negligible.
+
+## 9. Base Deformable DETR results (for reference)
+
+Track A starts from the R50 Deformable DETR checkpoint, whose official
+numbers on COCO val2017 are:
+
+| Method                                             | Epochs | AP   | AP_S | AP_M | AP_L | Params (M) | FPS  |
+| -------------------------------------------------- | :----: | :--: | :--: | :--: | :--: | :--------: | :--: |
+| Deformable DETR (single scale)                     |   50   | 39.4 | 20.6 | 43.0 | 55.5 | 34         | 27.0 |
+| Deformable DETR (single scale, DC5)                |   50   | 41.5 | 24.1 | 45.3 | 56.0 | 34         | 22.1 |
+| **Deformable DETR (R50, multi-scale)**             |   50   | 44.5 | 27.1 | 47.6 | 59.6 | 40         | 15.0 |
+| + iterative bounding-box refinement                |   50   | 46.2 | 28.3 | 49.2 | 61.5 | 41         | 15.0 |
+| ++ two-stage Deformable DETR                       |   50   | 46.9 | 29.6 | 50.1 | 61.6 | 41         | 14.5 |
+
+Track A preserves these numbers while adding calibrated per-box
+aleatoric uncertainty.
+
